@@ -18,7 +18,6 @@ interactive flag (used by repl-watch) reloads instead of starting.
 -}
 module Main (main) where
 
-import Control.Monad.State (get)
 import Data.Map.Strict qualified as Map
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -29,8 +28,8 @@ import Miso
 import Miso.Html.Element qualified as H
 import Miso.Html.Event qualified as E
 import Miso.Html.Property qualified as P
-import Miso.Lens (Lens, lens, (.=), (?=))
-import Miso.String (fromMisoString, ms)
+import Miso.Lens (Lens, lens, (.=))
+import Miso.String (MisoString, fromMisoString, ms)
 import Numeric (showFFloat)
 
 {- | UI state: pasted text, detected headers, config in progress,
@@ -178,38 +177,184 @@ computeOutcome m
 
 viewModel :: () -> () -> Model -> View () Model Action
 viewModel _ _ m =
-    H.main_
+    H.div_
         [P.class_ "giacenza"]
-        [ H.h1_ [] ["Giacenza"]
-        , H.p_
-            [P.class_ "hint"]
+        [ H.header_
+            [P.class_ "d-flex justify-content-center py-3"]
+            [ H.ul_
+                [P.class_ "nav nav-pills"]
+                [ H.li_
+                    [P.class_ "nav-item"]
+                    [ H.a_
+                        [ P.class_ "nav-link active"
+                        , P.href_ "#"
+                        ]
+                        ["Calculator"]
+                    ]
+                , H.li_
+                    [P.class_ "nav-item"]
+                    [ H.a_
+                        [ P.class_ "nav-link"
+                        , P.href_
+                            "https://paolino.github.io/giacenza/"
+                        ]
+                        ["Docs"]
+                    ]
+                ]
+            ]
+        , H.div_
+            [P.class_ "container-fluid"]
+            [ H.div_
+                [P.class_ "main"]
+                [ H.div_
+                    [P.class_ "accordion"]
+                    [ accordionItem
+                        "paste"
+                        "Paste CSV"
+                        (pasteBody m)
+                    , accordionItem
+                        "report"
+                        "Final report"
+                        (outcomeView (modelOutcome m))
+                    ]
+                ]
+            , H.div_
+                [P.class_ "footer"]
+                [footerView]
+            ]
+        ]
+
+-- | One always-open accordion section, matching the production chrome.
+accordionItem
+    :: MisoString
+    -> MisoString
+    -> View () Model Action
+    -> View () Model Action
+accordionItem ident title body =
+    H.div_
+        [P.class_ "accordion-item"]
+        [ H.h2_
+            [P.class_ "accordion-header"]
+            [ H.button_
+                [ P.class_ "accordion-button"
+                , P.type_ "button"
+                ]
+                [ H.h5_
+                    [P.class_ "text-center mb-0"]
+                    [text title]
+                ]
+            ]
+        , H.div_
+            [ P.class_ "accordion-collapse collapse show"
+            , P.id_ ident
+            ]
+            [H.div_ [P.class_ "accordion-body"] [body]]
+        ]
+
+pasteBody :: Model -> View () Model Action
+pasteBody m =
+    H.div_
+        []
+        [ H.p_
+            [P.class_ "hint text-body-secondary"]
             [ "Paste bank movements as CSV, confirm the columns and the number format, then compute."
             ]
-        , H.textarea_
-            [ P.class_ "paste"
-            , P.cols_ "60"
-            , P.rows_ "10"
-            , P.placeholder_ "date,amount\n2023-01-01,100"
-            , P.value_ (ms (modelPasted m))
-            , E.onInput (CsvInputChanged . fromMisoString)
+        , H.div_
+            [P.class_ "mb-3"]
+            [ H.label_
+                [P.class_ "form-label"]
+                ["CSV"]
+            , H.textarea_
+                [ P.class_ "paste form-control font-monospace"
+                , P.rows_ "10"
+                , P.placeholder_
+                    "date,amount\n2023-01-01,100"
+                , P.value_ (ms (modelPasted m))
+                , E.onInput
+                    (CsvInputChanged . fromMisoString)
+                ]
             ]
-        , columnPicker
-            "Date column"
-            DateColumnChanged
-            (modelDateColumn m)
-            (modelHeaders m)
-        , columnPicker
-            "Amount column"
-            AmountColumnChanged
-            (modelAmountColumn m)
-            (modelHeaders m)
-        , H.select_
-            [P.class_ "format", E.onChange (NumberFormatChanged . fromMisoString)]
-            [ formatOption European "European (1.234,56)" (modelFormat m)
-            , formatOption American "American (1,234.56)" (modelFormat m)
+        , H.div_
+            [P.class_ "row g-3 mb-3"]
+            [ H.div_
+                [P.class_ "col-md-4"]
+                [ columnPicker
+                    "Date column"
+                    DateColumnChanged
+                    (modelDateColumn m)
+                    (modelHeaders m)
+                ]
+            , H.div_
+                [P.class_ "col-md-4"]
+                [ columnPicker
+                    "Amount column"
+                    AmountColumnChanged
+                    (modelAmountColumn m)
+                    (modelHeaders m)
+                ]
+            , H.div_
+                [P.class_ "col-md-4"]
+                [ H.label_
+                    [P.class_ "form-label"]
+                    ["Number format"]
+                , H.select_
+                    [ P.class_ "format form-select"
+                    , E.onChange
+                        ( NumberFormatChanged
+                            . fromMisoString
+                        )
+                    ]
+                    [ formatOption
+                        European
+                        "European (1.234,56)"
+                        (modelFormat m)
+                    , formatOption
+                        American
+                        "American (1,234.56)"
+                        (modelFormat m)
+                    ]
+                ]
             ]
-        , H.button_ [P.class_ "compute", E.onClick ComputeRequested] ["Compute"]
-        , outcomeView (modelOutcome m)
+        , H.button_
+            [ P.class_ "compute btn btn-primary"
+            , P.type_ "button"
+            , E.onClick ComputeRequested
+            ]
+            ["Compute"]
+        ]
+
+footerView :: View () Model Action
+footerView =
+    H.footer_
+        [ P.class_
+            "d-md-flex flex-wrap justify-content-between align-items-center py-3 ms-4 border-top"
+        ]
+        [ H.div_
+            [P.class_ "col d-md-flex align-items-center"]
+            [ H.ul_
+                [P.class_ "nav flex-column"]
+                [ H.li_
+                    [P.class_ "nav-item mb-2"]
+                    [ "© 2023-2026 Paolo Veronelli, Lambdasistemi"
+                    ]
+                , H.li_
+                    [P.class_ "nav-item mb-2"]
+                    [ H.span_ [] ["Source code on "]
+                    , H.a_
+                        [ P.href_
+                            "https://github.com/paolino/giacenza-miso"
+                        ]
+                        ["GitHub"]
+                    ]
+                ]
+            ]
+        , H.div_
+            [P.class_ "col d-md-flex align-items-center"]
+            [ H.div_
+                [P.class_ "mb-3 mb-md-0 text-body-secondary"]
+                [ "Powered by Haskell, Miso, GHC wasm32-wasi, Bootstrap"
+                ]
+            ]
         ]
 
 -- | A select whose options are the detected headers.
@@ -221,12 +366,16 @@ columnPicker
     -> View () Model Action
 columnPicker label mk selected hs =
     H.label_
-        [P.class_ "column"]
+        [P.class_ "column form-label w-100"]
         [ text (ms label)
         , H.select_
-            [E.onChange (mk . fromMisoString)]
+            [ P.class_ "form-select"
+            , E.onChange (mk . fromMisoString)
+            ]
             [ H.option_
-                [P.value_ (ms h), P.selected_ (Just h == selected)]
+                [ P.value_ (ms h)
+                , P.selected_ (Just h == selected)
+                ]
                 [text (ms h)]
             | h <- hs
             ]
@@ -247,29 +396,50 @@ formatName American = "american"
 -- | Error node or result table (year, giacenza, saldo; two decimals).
 outcomeView :: Outcome -> View () Model Action
 outcomeView = \case
-    Idle -> H.p_ [P.class_ "idle"] ["Paste data and press Compute."]
-    Failure msg -> H.p_ [P.class_ "error"] [text (ms msg)]
-    Success (Result mp) ->
-        H.table_
-            [P.class_ "results"]
-            ( H.thead_
-                []
-                [ H.tr_
+    Idle ->
+        H.p_
+            [P.class_ "idle text-body-secondary"]
+            ["Paste data and press Compute."]
+    Failure msg ->
+        H.div_
+            [P.class_ "error alert alert-danger"]
+            [ H.h5_ [] ["Error in the request"]
+            , H.p_ [P.class_ "mb-0"] [text (ms msg)]
+            ]
+    Success (Result mp)
+        | Map.null mp ->
+            H.p_
+                [P.class_ "idle text-body-secondary"]
+                ["No results."]
+        | otherwise ->
+            H.table_
+                [P.class_ "results table table-striped"]
+                [ H.thead_
                     []
-                    [ H.th_ [] ["Year"]
-                    , H.th_ [] ["Giacenza"]
-                    , H.th_ [] ["Saldo"]
+                    [ H.tr_
+                        []
+                        [ H.th_ [P.class_ "text-end"] ["Year"]
+                        , H.th_ [P.class_ "text-end"] ["Average"]
+                        , H.th_ [P.class_ "text-end"] ["Last balance"]
+                        ]
+                    ]
+                , H.tbody_
+                    []
+                    [ H.tr_
+                        []
+                        [ H.td_
+                            [P.class_ "text-end"]
+                            [text (ms (show y))]
+                        , H.td_
+                            [P.class_ "text-end"]
+                            [text (ms (money (unGiacenza g)))]
+                        , H.td_
+                            [P.class_ "text-end"]
+                            [text (ms (money (unSaldo s)))]
+                        ]
+                    | (Year y, (s, g)) <- Map.toAscList mp
                     ]
                 ]
-                : [ H.tr_
-                    []
-                    [ H.td_ [] [text (ms (show y))]
-                    , H.td_ [] [text (ms (money (unGiacenza g)))]
-                    , H.td_ [] [text (ms (money (unSaldo s)))]
-                    ]
-                  | (Year y, (s, g)) <- Map.toAscList mp
-                  ]
-            )
 
 -- | Two-decimal amount rendering (showFFloat (Just 2)).
 money :: Value -> Text
