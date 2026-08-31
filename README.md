@@ -4,9 +4,10 @@ Giacenza average-balance calculator prototype in miso (Haskell MVU),
 compiled to GHC wasm32-wasi — evaluating miso against the
 PureScript/Halogen and Reflex/jsaddle-wasm paths.
 
-Paste a bank-movement CSV, confirm the date column, amount column and
-number format, and read a per-year table of *saldo* (31 Dec balance)
-and *giacenza* (average daily balance).
+Choose one or more bank-movement CSV files (or paste a CSV), confirm
+the date column, amount column and number format per statement, and
+read a per-year table of *saldo* (31 Dec balance) and *giacenza*
+(average daily balance). Final report sums the analysed statements.
 
 ## Develop
 
@@ -62,8 +63,8 @@ EVIDENCE_DIR=/tmp/shots just browser-smoke
 ```
 
 Covers INV-1-CONST (paste + compute → table 2023, 100.00, 100.00),
-INV-1-ERROR-DATE and INV-1-ERROR-EMPTY; screenshots land in
-`$EVIDENCE_DIR`.
+INV-1-ERROR-DATE, INV-1-ERROR-EMPTY, and CSV file upload; screenshots
+land in `$EVIDENCE_DIR`.
 
 ## Wasm devloop notes (evaluated 2026-08-31, GHC 9.14.1.20260330
 via miso's flake `devShells.wasm` / ghc-wasm-meta `all_9_14`)

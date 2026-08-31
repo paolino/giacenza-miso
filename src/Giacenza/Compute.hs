@@ -14,10 +14,11 @@ length. Does not own CSV or DOM.
 -}
 module Giacenza.Compute
     ( yearResults
+    , sumResults
     ) where
 
 import Data.Function (on)
-import Data.List (groupBy)
+import Data.List (foldl', groupBy)
 import Data.Map.Merge.Strict qualified as MapMerge
 import Data.Map.Strict qualified as Map
 import Data.Time.Calendar
@@ -63,6 +64,16 @@ yearResults movements =
             , let y = yearOf d0
             , let vs = map snd grp
             ]
+
+{- | Add per-year saldo and giacenza across statements, matching
+production 'sumResults'. Missing years stay absent.
+-}
+sumResults :: [Result] -> Result
+sumResults = foldl' add (Result Map.empty)
+  where
+    add (Result a) (Result b) =
+        Result (Map.unionWith addYear a b)
+    addYear (s, g) (s', g') = (s + s', g + g')
 
 {- | Expand sparse movements to a dense daily balance, in apply
 order: days before the first movement are omitted; each subsequent

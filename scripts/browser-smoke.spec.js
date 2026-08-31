@@ -47,10 +47,11 @@ test.describe("giacenza wasm page", () => {
     await page.locator("textarea.paste").fill("date,amount\n2023-01-01,100");
     await expect(page.locator("label.column select")).toHaveCount(2);
     await page.locator("button.compute").click();
-    await expect(page.locator("table.results")).toBeVisible();
-    await expect(page.locator("table.results td").first()).toHaveText("2023");
-    await expect(page.locator("table.results td").nth(1)).toHaveText("100.00");
-    await expect(page.locator("table.results td").nth(2)).toHaveText("100.00");
+    const constTable = page.locator("table.results").first();
+    await expect(constTable).toBeVisible();
+    await expect(constTable.locator("td").nth(0)).toHaveText("2023");
+    await expect(constTable.locator("td").nth(1)).toHaveText("100.00");
+    await expect(constTable.locator("td").nth(2)).toHaveText("100.00");
     await expect(page.locator(".error")).toHaveCount(0);
     await page.screenshot({ path: `${evidence}/inv1-const.png`, fullPage: true });
   });
@@ -78,5 +79,30 @@ test.describe("giacenza wasm page", () => {
     await expect(page.locator(".error")).toBeVisible();
     await expect(page.locator(".error")).toContainText("Empty input");
     await page.screenshot({ path: `${evidence}/inv1-error-empty.png`, fullPage: true });
+  });
+
+  test("file upload: choosing a CSV creates a named statement", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await expect(page.locator("textarea.paste")).toBeVisible({
+      timeout: 120_000,
+    });
+    await page.locator("input.csv-file").setInputFiles({
+      name: "alpha.csv",
+      mimeType: "text/csv",
+      buffer: Buffer.from("date,amount\n2023-01-01,100"),
+    });
+    await expect(page.getByText("alpha.csv")).toBeVisible();
+    await page.getByRole("button", { name: "Analyze" }).click();
+    const uploadTable = page.locator("table.results").first();
+    await expect(uploadTable).toBeVisible();
+    await expect(uploadTable.locator("td").nth(0)).toHaveText("2023");
+    await expect(uploadTable.locator("td").nth(1)).toHaveText("100.00");
+    await expect(uploadTable.locator("td").nth(2)).toHaveText("100.00");
+    await page.screenshot({
+      path: `${evidence}/file-upload.png`,
+      fullPage: true,
+    });
   });
 });

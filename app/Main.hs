@@ -8,17 +8,19 @@ Description : Miso MVU front-end of the giacenza calculator
 Copyright   : (c) 2026, paolino
 License     : BSD-3-Clause
 
-One MVU component: paste a CSV, confirm the date column, amount
-column and number format, compute per-year saldo and giacenza. All
-parsing and computation is delegated to the domain library; this
-module owns no second parser and no second average-balance formula.
+One MVU component: paste one or more CSVs, confirm columns and
+number format per statement, see per-statement results and an
+aggregated final report. Parsing and computation stay in the
+domain library.
 
 The wasm build exports @main@ to JavaScript as @hs_start@; the
 interactive flag (used by repl-watch) reloads instead of starting.
 -}
 module Main (main) where
 
+import Control.Monad (forM_, void)
 import Data.Map.Strict qualified as Map
+import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Giacenza.Compute qualified as GC
@@ -29,19 +31,46 @@ import Miso.Html.Element qualified as H
 import Miso.Html.Event qualified as E
 import Miso.Html.Property qualified as P
 import Miso.Lens (Lens, lens, (.=))
-import Miso.String (MisoString, fromMisoString, ms)
 import Numeric (showFFloat)
+import Prelude hiding ((!!))
 
-{- | UI state: pasted text, detected headers, config in progress,
-and either a result, an error, or idle.
--}
+-- | Draft in the Add-files section (not yet a statement).
+data Draft = Draft
+    { draftPasted :: Text
+    , draftHeaders :: [Text]
+    , draftDateColumn :: Maybe Text
+    , draftAmountColumn :: Maybe Text
+    , draftFormat :: NumberFormat
+    , draftError :: Maybe Text
+    }
+    deriving (Show, Eq)
+
+-- | One pasted CSV in the original multi-statement workflow.
+data Statement = Statement
+    { stmtId :: Int
+    , stmtName :: Text
+    , stmtPasted :: Text
+    , stmtHeaders :: [Text]
+    , stmtDateColumn :: Maybe Text
+    , stmtAmountColumn :: Maybe Text
+    , stmtFormat :: NumberFormat
+    , stmtOutcome :: Outcome
+    , stmtEditing :: Bool
+    }
+    deriving (Show, Eq)
+
+-- | Which nav pill is showing.
+data Page
+    = StatementsPage
+    | AboutPage
+    deriving (Show, Eq)
+
+-- | Page state: add-files draft plus zero or more statements.
 data Model = Model
-    { modelPasted :: Text
-    , modelHeaders :: [Text]
-    , modelDateColumn :: Maybe Text
-    , modelAmountColumn :: Maybe Text
-    , modelFormat :: NumberFormat
-    , modelOutcome :: Outcome
+    { modelDraft :: Draft
+    , modelStatements :: [Statement]
+    , modelNextId :: Int
+    , modelPage :: Page
     }
     deriving (Show, Eq)
 
@@ -58,38 +87,51 @@ data Action
     | AmountColumnChanged Text
     | NumberFormatChanged Text
     | ComputeRequested
-    deriving (Show, Eq)
+    | FilesChosen JSVal
+    | FileLoaded Text Text
+    | ShowPage Page
+    | StmtDate Int Text
+    | StmtAmount Int Text
+    | StmtFormat Int Text
+    | Analyze Int
+    | Reconfigure Int
+    | Delete Int
+    | ReconfigureAll
+    | DeleteAll
 
--- | Empty paste, no columns, European format, idle.
+emptyDraft :: Draft
+emptyDraft =
+    Draft
+        { draftPasted = ""
+        , draftHeaders = []
+        , draftDateColumn = Nothing
+        , draftAmountColumn = Nothing
+        , draftFormat = European
+        , draftError = Nothing
+        }
+
+-- | Empty add-files draft, no statements.
 initialModel :: Model
 initialModel =
     Model
-        { modelPasted = ""
-        , modelHeaders = []
-        , modelDateColumn = Nothing
-        , modelAmountColumn = Nothing
-        , modelFormat = European
-        , modelOutcome = Idle
+        { modelDraft = emptyDraft
+        , modelStatements = []
+        , modelNextId = 1
+        , modelPage = StatementsPage
         }
 
--- Miso record lenses over 'Model'.
-lPasted :: Lens Model Text
-lPasted = lens modelPasted (\m x -> m{modelPasted = x})
+lPage :: Lens Model Page
+lPage = lens modelPage (\m x -> m{modelPage = x})
 
-lHeaders :: Lens Model [Text]
-lHeaders = lens modelHeaders (\m x -> m{modelHeaders = x})
+lDraft :: Lens Model Draft
+lDraft = lens modelDraft (\m x -> m{modelDraft = x})
 
-lDateColumn :: Lens Model (Maybe Text)
-lDateColumn = lens modelDateColumn (\m x -> m{modelDateColumn = x})
+lStatements :: Lens Model [Statement]
+lStatements =
+    lens modelStatements (\m x -> m{modelStatements = x})
 
-lAmountColumn :: Lens Model (Maybe Text)
-lAmountColumn = lens modelAmountColumn (\m x -> m{modelAmountColumn = x})
-
-lFormat :: Lens Model NumberFormat
-lFormat = lens modelFormat (\m x -> m{modelFormat = x})
-
-lOutcome :: Lens Model Outcome
-lOutcome = lens modelOutcome (\m x -> m{modelOutcome = x})
+lNextId :: Lens Model Int
+lNextId = lens modelNextId (\m x -> m{modelNextId = x})
 
 #ifdef WASM
 #ifndef INTERACTIVE
@@ -110,23 +152,143 @@ app = component initialModel updateModel viewModel
 
 updateModel :: Action -> Effect () () Model Action
 updateModel = \case
-    CsvInputChanged t -> do
-        lPasted .= t
-        lHeaders .= headersOf t
-        lDateColumn .= firstHeader (headersOf t)
-        lAmountColumn .= secondHeader (headersOf t)
-        lOutcome .= Idle
-    DateColumnChanged name ->
-        lDateColumn .= Just name
-    AmountColumnChanged name ->
-        lAmountColumn .= Just name
-    NumberFormatChanged "american" ->
-        lFormat .= American
-    NumberFormatChanged _ ->
-        lFormat .= European
+    CsvInputChanged t ->
+        lDraft
+            .= emptyDraft
+                { draftPasted = t
+                , draftHeaders = hs
+                , draftDateColumn = firstHeader hs
+                , draftAmountColumn = secondHeader hs
+                , draftFormat = European
+                }
+      where
+        hs = headersOf t
+    DateColumnChanged name -> do
+        m <- get
+        lDraft .= (modelDraft m){draftDateColumn = Just name}
+    AmountColumnChanged name -> do
+        m <- get
+        lDraft .= (modelDraft m){draftAmountColumn = Just name}
+    NumberFormatChanged "american" -> do
+        m <- get
+        lDraft .= (modelDraft m){draftFormat = American}
+    NumberFormatChanged _ -> do
+        m <- get
+        lDraft .= (modelDraft m){draftFormat = European}
+    FilesChosen input ->
+        withSink $ \sink -> do
+            fs <- chosenFiles input
+            forM_ fs (readCsvFile sink)
+            setValue input ("" :: MisoString)
+    FileLoaded name content -> do
+        m <- get
+        let
+            hs = headersOf content
+            i = modelNextId m
+            stmt =
+                Statement
+                    { stmtId = i
+                    , stmtName = name
+                    , stmtPasted = content
+                    , stmtHeaders = hs
+                    , stmtDateColumn = firstHeader hs
+                    , stmtAmountColumn = secondHeader hs
+                    , stmtFormat = draftFormat (modelDraft m)
+                    , stmtOutcome = Idle
+                    , stmtEditing = True
+                    }
+        lStatements .= modelStatements m <> [stmt]
+        lNextId .= i + 1
+    ShowPage p ->
+        lPage .= p
     ComputeRequested -> do
         m <- get
-        lOutcome .= computeOutcome m
+        case computeDraft (modelDraft m) of
+            Left err ->
+                lDraft
+                    .= (modelDraft m){draftError = Just err}
+            Right (_, result) -> do
+                let
+                    d = modelDraft m
+                    i = modelNextId m
+                    stmt =
+                        Statement
+                            { stmtId = i
+                            , stmtName = "CSV " <> T.pack (show i)
+                            , stmtPasted = draftPasted d
+                            , stmtHeaders = draftHeaders d
+                            , stmtDateColumn = draftDateColumn d
+                            , stmtAmountColumn = draftAmountColumn d
+                            , stmtFormat = draftFormat d
+                            , stmtOutcome = Success result
+                            , stmtEditing = False
+                            }
+                lStatements .= modelStatements m <> [stmt]
+                lNextId .= i + 1
+                lDraft .= emptyDraft{draftFormat = draftFormat d}
+    StmtDate i name ->
+        modifyStmt i (\s -> s{stmtDateColumn = Just name})
+    StmtAmount i name ->
+        modifyStmt i (\s -> s{stmtAmountColumn = Just name})
+    StmtFormat i "american" ->
+        modifyStmt i (\s -> s{stmtFormat = American})
+    StmtFormat i _ ->
+        modifyStmt i (\s -> s{stmtFormat = European})
+    Analyze i -> do
+        m <- get
+        lStatements
+            .= [ if stmtId s == i
+                then s{stmtOutcome = analyzeStatement s, stmtEditing = False}
+                else s
+               | s <- modelStatements m
+               ]
+    Reconfigure i ->
+        modifyStmt i (\s -> s{stmtEditing = True})
+    Delete i -> do
+        m <- get
+        lStatements .= filter ((/= i) . stmtId) (modelStatements m)
+    ReconfigureAll -> do
+        m <- get
+        lStatements .= map (\s -> s{stmtEditing = True}) (modelStatements m)
+    DeleteAll ->
+        lStatements .= []
+
+modifyStmt
+    :: Int
+    -> (Statement -> Statement)
+    -> Effect () () Model Action
+modifyStmt i f = do
+    m <- get
+    lStatements
+        .= [if stmtId s == i then f s else s | s <- modelStatements m]
+
+{- | FileList is array-like, not a JS Array, so 'files' (which
+requires Array.isArray) fails. Index by length instead.
+-}
+chosenFiles :: JSVal -> IO [JSVal]
+chosenFiles input = do
+    fileList <- input ! ("files" :: MisoString)
+    n <- fromJSValUnchecked =<< fileList ! ("length" :: MisoString)
+    mapM (fileList !!) [0 :: Int .. n - 1]
+
+-- | Read one chosen file as UTF-8 text and dispatch 'FileLoaded'.
+readCsvFile :: Sink Action -> JSVal -> IO ()
+readCsvFile sink file = do
+    name <- fromJSValUnchecked =<< file ! ("name" :: MisoString)
+    reader <- newFileReader
+    setField reader ("onload" :: MisoString)
+        =<< asyncCallback
+            ( do
+                result <-
+                    fromJSValUnchecked
+                        =<< reader ! ("result" :: MisoString)
+                sink
+                    ( FileLoaded
+                        (fromMisoString name)
+                        (fromMisoString result)
+                    )
+            )
+    void $ reader # ("readAsText" :: MisoString) $ [file]
 
 -- | Headers detected from the paste; [] when it does not parse.
 headersOf :: Text -> [Text]
@@ -144,36 +306,68 @@ secondHeader hs = case hs of
     (_ : h : _) -> Just h
     _ -> Nothing
 
+computeDraft :: Draft -> Either Text (Config, Result)
+computeDraft d =
+    outcomeOf
+        (draftPasted d)
+        (draftDateColumn d)
+        (draftAmountColumn d)
+        (draftFormat d)
+
+analyzeStatement :: Statement -> Outcome
+analyzeStatement s =
+    case outcomeOf
+        (stmtPasted s)
+        (stmtDateColumn s)
+        (stmtAmountColumn s)
+        (stmtFormat s) of
+        Left err -> Failure err
+        Right (_, result) -> Success result
+
 {- | One paste, one outcome: an error names its cause class and the
 result table is not shown for the same submit.
 -}
-computeOutcome :: Model -> Outcome
-computeOutcome m
-    | T.null (T.strip (modelPasted m)) =
-        Failure (renderParseError EmptyInput)
+outcomeOf
+    :: Text
+    -> Maybe Text
+    -> Maybe Text
+    -> NumberFormat
+    -> Either Text (Config, Result)
+outcomeOf pasted mDate mAmount fmt
+    | T.null (T.strip pasted) =
+        Left (renderParseError EmptyInput)
     | otherwise =
-        case GP.parseCsv (modelPasted m) of
+        case GP.parseCsv pasted of
             Left e ->
-                Failure (renderParseError e)
+                Left (renderParseError e)
             Right table ->
-                case (modelDateColumn m, modelAmountColumn m) of
+                case (mDate, mAmount) of
                     (Just dc, Just ac) ->
                         let
                             cfg =
                                 Config
-                                    { configNumberFormat = modelFormat m
+                                    { configNumberFormat = fmt
                                     , configDateColumn = dc
                                     , configAmountColumn = ac
                                     }
                         in
-                            either
-                                (Failure . renderParseError)
-                                (Success . GC.yearResults)
-                                (GP.extractMovements cfg table)
+                            case GP.extractMovements cfg table of
+                                Left e ->
+                                    Left (renderParseError e)
+                                Right movements ->
+                                    Right (cfg, GC.yearResults movements)
                     (Nothing, _) ->
-                        Failure (renderParseError (MissingColumn "date"))
+                        Left (renderParseError (MissingColumn "date"))
                     (_, Nothing) ->
-                        Failure (renderParseError (MissingColumn "amount"))
+                        Left (renderParseError (MissingColumn "amount"))
+
+successfulResults :: [Statement] -> [Result]
+successfulResults stmts =
+    [ r
+    | s <- stmts
+    , Success r <- [stmtOutcome s]
+    , not (stmtEditing s)
+    ]
 
 viewModel :: () -> () -> Model -> View () Model Action
 viewModel _ _ m =
@@ -185,20 +379,29 @@ viewModel _ _ m =
                 [P.class_ "nav nav-pills"]
                 [ H.li_
                     [P.class_ "nav-item"]
-                    [ H.a_
-                        [ P.class_ "nav-link active"
-                        , P.href_ "#"
+                    [ H.button_
+                        [ P.class_
+                            ( if modelPage m == StatementsPage
+                                then "nav-link active"
+                                else "nav-link"
+                            )
+                        , P.type_ "button"
+                        , E.onClick (ShowPage StatementsPage)
                         ]
-                        ["Calculator"]
+                        ["Statements"]
                     ]
                 , H.li_
                     [P.class_ "nav-item"]
-                    [ H.a_
-                        [ P.class_ "nav-link"
-                        , P.href_
-                            "https://paolino.github.io/giacenza/"
+                    [ H.button_
+                        [ P.class_
+                            ( if modelPage m == AboutPage
+                                then "nav-link active"
+                                else "nav-link"
+                            )
+                        , P.type_ "button"
+                        , E.onClick (ShowPage AboutPage)
                         ]
-                        ["Docs"]
+                        ["About"]
                     ]
                 ]
             ]
@@ -206,17 +409,35 @@ viewModel _ _ m =
             [P.class_ "container-fluid"]
             [ H.div_
                 [P.class_ "main"]
-                [ H.div_
-                    [P.class_ "accordion"]
-                    [ accordionItem
-                        "paste"
-                        "Paste CSV"
-                        (pasteBody m)
-                    , accordionItem
-                        "report"
-                        "Final report"
-                        (outcomeView (modelOutcome m))
-                    ]
+                [ case modelPage m of
+                    AboutPage -> aboutView
+                    StatementsPage ->
+                        H.div_
+                            [P.class_ "accordion"]
+                            ( [ accordionItem
+                                    "report"
+                                    (plainTitle "Final report")
+                                    ( aggregateView
+                                        ( successfulResults
+                                            (modelStatements m)
+                                        )
+                                    )
+                              ]
+                                <> [ statementItem s
+                                   | s <- modelStatements m
+                                   ]
+                                <> [ accordionItem
+                                        "add"
+                                        (plainTitle "Add files")
+                                        (pasteBody (modelDraft m))
+                                   ]
+                                <> [ accordionItem
+                                    "global"
+                                    (plainTitle "Global changes")
+                                    globalBody
+                                   | not (null (modelStatements m))
+                                   ]
+                            )
                 ]
             , H.div_
                 [P.class_ "footer"]
@@ -224,10 +445,51 @@ viewModel _ _ m =
             ]
         ]
 
+aboutView :: View () Model Action
+aboutView =
+    H.div_
+        [P.class_ "container py-3"]
+        [ H.h5_ [] ["About"]
+        , H.p_
+            []
+            [ "This is a simple web application to compute the average deposit and the end of the year balance of a bank account from CSV statements. The average deposit is the daily average of the deposit. The balance is the deposited value at the last day of the year."
+            ]
+        , H.ul_
+            []
+            [ H.li_
+                []
+                [ "Add one or more CSV files (file picker, multiple selection) or paste a CSV. Each statement is configured and reported separately; Final report sums them."
+                ]
+            , H.li_
+                []
+                [ "The CSV must have a header with the date and amount fields (names chosen in the form) and should contain the movements of the account history."
+                ]
+            , H.li_
+                []
+                ["The date field must be in the format YYYY-MM-DD."]
+            , H.li_
+                []
+                [ "The amount field must be a number, with the decimal separator chosen in the form (European 1.234,56 or American 1,234.56)."
+                ]
+            ]
+        , H.p_
+            []
+            [ "The result is a table with the average deposit and the balance for each year."
+            ]
+        , H.p_
+            []
+            [ "All work stays in this browser tab. Nothing is uploaded to a server."
+            ]
+        ]
+
+plainTitle :: MisoString -> View () Model Action
+plainTitle title =
+    H.h5_ [P.class_ "text-center mb-0"] [text title]
+
 -- | One always-open accordion section, matching the production chrome.
 accordionItem
     :: MisoString
-    -> MisoString
+    -> View () Model Action
     -> View () Model Action
     -> View () Model Action
 accordionItem ident title body =
@@ -239,37 +501,213 @@ accordionItem ident title body =
                 [ P.class_ "accordion-button"
                 , P.type_ "button"
                 ]
-                [ H.h5_
-                    [P.class_ "text-center mb-0"]
-                    [text title]
-                ]
+                [title]
             ]
         , H.div_
             [ P.class_ "accordion-collapse collapse show"
             , P.id_ ident
             ]
-            [H.div_ [P.class_ "accordion-body"] [body]]
+            [ H.div_
+                [P.class_ "accordion-body d-md-flex w-100 flex-wrap"]
+                [body]
+            ]
         ]
 
-pasteBody :: Model -> View () Model Action
-pasteBody m =
+statementItem :: Statement -> View () Model Action
+statementItem s =
+    accordionItem
+        (ms ("stmt-" <> T.pack (show (stmtId s))))
+        (statementHeader s)
+        (statementBody s)
+
+statementHeader :: Statement -> View () Model Action
+statementHeader s =
     H.div_
-        []
+        [P.class_ "d-flex align-items-center"]
+        [ H.span_
+            [P.class_ (ms ("badge " <> badgeClass s <> " ms-2 me-2"))]
+            [text (ms (badgeLabel s))]
+        , H.h5_ [P.class_ "mb-0"] [text (ms (stmtName s))]
+        ]
+
+badgeClass :: Statement -> Text
+badgeClass s
+    | stmtEditing s = "bg-info"
+    | otherwise = case stmtOutcome s of
+        Idle -> "bg-warning"
+        Failure _ -> "bg-danger"
+        Success _ -> "bg-success"
+
+badgeLabel :: Statement -> Text
+badgeLabel s
+    | stmtEditing s = "Configured"
+    | otherwise = case stmtOutcome s of
+        Idle -> "Not done"
+        Failure _ -> "Failed"
+        Success _ -> "Success"
+
+statementBody :: Statement -> View () Model Action
+statementBody s
+    | stmtEditing s || isIdle (stmtOutcome s) =
+        H.div_
+            [P.class_ "w-100"]
+            [ stmtConfigForm s
+            , H.div_
+                [P.class_ "d-flex gap-2 mt-3"]
+                [ H.button_
+                    [ P.class_ "btn btn-primary"
+                    , P.type_ "button"
+                    , E.onClick (Analyze (stmtId s))
+                    ]
+                    ["Analyze"]
+                , deleteButton (stmtId s)
+                ]
+            ]
+    | otherwise =
+        H.div_
+            [P.class_ "d-md-flex w-100 flex-wrap gap-3"]
+            [ H.div_
+                [P.class_ "col-md-4"]
+                [configSummary s]
+            , H.div_
+                [P.class_ "col-md-4"]
+                [outcomeView (stmtOutcome s)]
+            , H.div_
+                [P.class_ "col-md-4"]
+                [ H.div_
+                    [P.class_ "d-flex gap-2"]
+                    [ H.button_
+                        [ P.class_ "btn btn-warning"
+                        , P.type_ "button"
+                        , E.onClick (Reconfigure (stmtId s))
+                        ]
+                        ["Reconfigure"]
+                    , deleteButton (stmtId s)
+                    ]
+                ]
+            ]
+
+isIdle :: Outcome -> Bool
+isIdle Idle = True
+isIdle _ = False
+
+deleteButton :: Int -> View () Model Action
+deleteButton i =
+    H.button_
+        [ P.class_ "btn btn-danger"
+        , P.type_ "button"
+        , E.onClick (Delete i)
+        ]
+        ["Delete"]
+
+stmtConfigForm :: Statement -> View () Model Action
+stmtConfigForm s =
+    H.div_
+        [P.class_ "row g-3"]
+        [ H.div_
+            [P.class_ "col-md-4"]
+            [ columnPicker
+                "Date column"
+                (StmtDate (stmtId s))
+                (stmtDateColumn s)
+                (stmtHeaders s)
+            ]
+        , H.div_
+            [P.class_ "col-md-4"]
+            [ columnPicker
+                "Amount column"
+                (StmtAmount (stmtId s))
+                (stmtAmountColumn s)
+                (stmtHeaders s)
+            ]
+        , H.div_
+            [P.class_ "col-md-4"]
+            [ H.label_
+                [P.class_ "form-label"]
+                ["Number format"]
+            , H.select_
+                [ P.class_ "form-select"
+                , E.onChange
+                    ( StmtFormat (stmtId s)
+                        . fromMisoString
+                    )
+                ]
+                [ formatOption
+                    European
+                    "European (1.234,56)"
+                    (stmtFormat s)
+                , formatOption
+                    American
+                    "American (1,234.56)"
+                    (stmtFormat s)
+                ]
+            ]
+        ]
+
+configSummary :: Statement -> View () Model Action
+configSummary s =
+    H.div_
+        [P.class_ "text-body-secondary"]
+        [ H.div_
+            []
+            [text (ms ("Number format  " <> formatLabel (stmtFormat s)))]
+        , H.div_
+            []
+            [ text
+                ( ms
+                    ( "Date field name  "
+                        <> fromMaybe "" (stmtDateColumn s)
+                    )
+                )
+            ]
+        , H.div_
+            []
+            [ text
+                ( ms
+                    ( "Amount field name  "
+                        <> fromMaybe "" (stmtAmountColumn s)
+                    )
+                )
+            ]
+        ]
+
+formatLabel :: NumberFormat -> Text
+formatLabel European = "European"
+formatLabel American = "American"
+
+pasteBody :: Draft -> View () Model Action
+pasteBody d =
+    H.div_
+        [P.class_ "w-100"]
         [ H.p_
             [P.class_ "hint text-body-secondary"]
-            [ "Paste bank movements as CSV, confirm the columns and the number format, then compute."
+            [ "Choose one or more CSV files, or paste a CSV and submit. Each statement is configured and reported separately; Final report sums them."
             ]
         , H.div_
             [P.class_ "mb-3"]
             [ H.label_
                 [P.class_ "form-label"]
-                ["CSV"]
+                ["CSV file:"]
+            , H.input_
+                [ P.id_ "csv-data"
+                , P.class_ "csv-file form-control"
+                , P.type_ "file"
+                , P.multiple_ True
+                , P.accept_ ".csv,text/csv,text/plain"
+                , E.onChangeWith (const FilesChosen)
+                ]
+            ]
+        , H.div_
+            [P.class_ "mb-3"]
+            [ H.label_
+                [P.class_ "form-label"]
+                ["Or paste CSV"]
             , H.textarea_
                 [ P.class_ "paste form-control font-monospace"
                 , P.rows_ "10"
                 , P.placeholder_
                     "date,amount\n2023-01-01,100"
-                , P.value_ (ms (modelPasted m))
+                , P.value_ (ms (draftPasted d))
                 , E.onInput
                     (CsvInputChanged . fromMisoString)
                 ]
@@ -281,16 +719,16 @@ pasteBody m =
                 [ columnPicker
                     "Date column"
                     DateColumnChanged
-                    (modelDateColumn m)
-                    (modelHeaders m)
+                    (draftDateColumn d)
+                    (draftHeaders d)
                 ]
             , H.div_
                 [P.class_ "col-md-4"]
                 [ columnPicker
                     "Amount column"
                     AmountColumnChanged
-                    (modelAmountColumn m)
-                    (modelHeaders m)
+                    (draftAmountColumn d)
+                    (draftHeaders d)
                 ]
             , H.div_
                 [P.class_ "col-md-4"]
@@ -307,21 +745,56 @@ pasteBody m =
                     [ formatOption
                         European
                         "European (1.234,56)"
-                        (modelFormat m)
+                        (draftFormat d)
                     , formatOption
                         American
                         "American (1,234.56)"
-                        (modelFormat m)
+                        (draftFormat d)
                     ]
                 ]
             ]
+        , maybe
+            (H.span_ [] [])
+            ( \err ->
+                H.div_
+                    [P.class_ "error alert alert-danger"]
+                    [ H.h5_ [] ["Error in the request"]
+                    , H.p_ [P.class_ "mb-0"] [text (ms err)]
+                    ]
+            )
+            (draftError d)
         , H.button_
             [ P.class_ "compute btn btn-primary"
             , P.type_ "button"
             , E.onClick ComputeRequested
             ]
-            ["Compute"]
+            ["Submit"]
         ]
+
+globalBody :: View () Model Action
+globalBody =
+    H.div_
+        [P.class_ "d-grid gap-2 d-md-flex justify-content-md-end w-100"]
+        [ H.button_
+            [ P.class_ "btn btn-warning"
+            , P.type_ "button"
+            , E.onClick ReconfigureAll
+            ]
+            ["Reconfigure all files"]
+        , H.button_
+            [ P.class_ "btn btn-danger"
+            , P.type_ "button"
+            , E.onClick DeleteAll
+            ]
+            ["Delete all files"]
+        ]
+
+aggregateView :: [Result] -> View () Model Action
+aggregateView rs = outcomeView (aggregateOutcome rs)
+
+aggregateOutcome :: [Result] -> Outcome
+aggregateOutcome [] = Idle
+aggregateOutcome rs = Success (GC.sumResults rs)
 
 footerView :: View () Model Action
 footerView =
@@ -393,13 +866,13 @@ formatName :: NumberFormat -> Text
 formatName European = "european"
 formatName American = "american"
 
--- | Error node or result table (year, giacenza, saldo; two decimals).
+-- | Error node or result table (year, average, last balance).
 outcomeView :: Outcome -> View () Model Action
 outcomeView = \case
     Idle ->
         H.p_
             [P.class_ "idle text-body-secondary"]
-            ["Paste data and press Compute."]
+            ["No results."]
     Failure msg ->
         H.div_
             [P.class_ "error alert alert-danger"]

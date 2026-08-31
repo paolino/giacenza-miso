@@ -16,7 +16,7 @@ import Data.Map.Strict qualified as Map
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Time.Calendar
-import Giacenza.Compute (yearResults)
+import Giacenza.Compute (sumResults, yearResults)
 import Giacenza.Parse (extractMovements, parseCsv)
 import Giacenza.Types
 import Test.Hspec
@@ -83,6 +83,21 @@ genWholeAmount = QC.chooseInteger (-1000000, 1000000)
 
 spec :: Spec
 spec = do
+    describe "sumResults" $ do
+        it "adds saldo and giacenza per year across statements" $ do
+            let
+                one =
+                    either
+                        (error "const csv")
+                        id
+                        (american "date,amount\n2023-01-01,100")
+            case yearRow (sumResults [one, one]) 2023 of
+                Just (Saldo s, Giacenza g) -> do
+                    s `shouldBe` Value 200
+                    g `shouldSatisfy` near 200
+                Nothing ->
+                    expectationFailure "2023 missing from sum"
+
     describe "pipeline (parseCsv + extractMovements + yearResults)" $ do
         it
             "prop_inv1_euro: European config carries 1.234,56 through to saldo/giacenza"
