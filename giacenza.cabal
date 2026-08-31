@@ -1,0 +1,83 @@
+cabal-version:      3.0
+name:               giacenza
+version:            0.1.0.0
+synopsis:           Giacenza average-balance calculator core (CSV parse + compute)
+description:        Domain core of the giacenza average-balance calculator:
+                    CSV parsing (headers, dates, European/American amounts)
+                    and per-year saldo/giacenza computation. Part of a miso
+                    wasm32-wasi prototype, see README.
+license:            BSD-3-Clause
+license-file:       LICENSE
+author:             paolino
+maintainer:         paolino@lambdasistemi.it
+copyright:          2026 paolino
+category:           Finance
+build-type:         Simple
+extra-doc-files:    README.md
+
+common warnings
+  ghc-options:
+    -Wall
+  default-language: GHC2021
+
+flag interactive
+  description:
+    Build the wasm main as a reloadable interactive reactor
+    (used by repl-watch during development).
+  default:      False
+  manual:       True
+
+library
+  import:             warnings
+  exposed-modules:
+    Giacenza.Compute
+    Giacenza.Parse
+    Giacenza.Types
+  hs-source-dirs:     src
+  build-depends:
+    , base < 5
+    , containers < 0.9
+    , text < 2.3
+    , time < 1.16
+  default-language:   GHC2021
+
+executable giacenza-app
+  import:             warnings
+  main-is:            Main.hs
+  hs-source-dirs:     app
+  build-depends:
+    , base < 5
+    , containers < 0.9
+    , giacenza
+    , miso >= 1.9 && < 2
+    , mtl < 2.4
+    , text < 2.3
+    , time < 1.16
+  default-language:   GHC2021
+  ghc-options:        -Wall
+  if arch(wasm32)
+    ghc-options:
+      -no-hs-main -optl-mexec-model=reactor "-optl-Wl,--export=hs_start"
+    cpp-options:      -DWASM
+    if flag(interactive)
+      cpp-options:
+        -DINTERACTIVE
+
+test-suite unit
+  import:             warnings
+  type:               exitcode-stdio-1.0
+  main-is:            Main.hs
+  other-modules:
+    Giacenza.ComputeSpec
+    Giacenza.ParseSpec
+  hs-source-dirs:     test
+  build-depends:
+    , base < 5
+    , containers < 0.9
+    , giacenza
+    , hspec < 2.13
+    , QuickCheck < 2.16
+    , text < 2.3
+    , time < 1.16
+  default-language:   GHC2021
+  ghc-options:        -Wall
