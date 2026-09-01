@@ -1,0 +1,4 @@
+packages: .
+
+package giacenza
+  ghc-options: -Werror
