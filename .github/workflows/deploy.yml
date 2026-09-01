@@ -1,0 +1,58 @@
+name: deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    # No self-hosted epyc runner is available here: those runners are
+    # registered to the lambdasistemi org, not usable by a personal
+    # paolino/* repo. Build on a GitHub-hosted runner instead and deploy
+    # over SSH with a key restricted (forced command on the epyc side) to
+    # rsync-ing into exactly one directory — see
+    # /usr/local/bin/giacenza-miso-deploy-wrapper.sh on the host.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: cachix/install-nix-action@v30
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - uses: cachix/cachix-action@v15
+        with:
+          name: haskell-miso-cachix
+
+      - name: Build wasm app
+        run: nix develop .#wasm --command just wasm
+
+      - name: Deploy to production
+        env:
+          SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          install -m 600 /dev/null id_ed25519
+          printf '%s\n' "$SSH_KEY" > id_ed25519
+          printf '%s\n' "$KNOWN_HOSTS" > known_hosts
+          rsync -rlc --delete \
+            -e "ssh -i id_ed25519 -o IdentitiesOnly=yes -o UserKnownHostsFile=known_hosts" \
+            public/ paolino@116.202.37.101:/srv/prod-hot/personal-sites/giacenza-miso/
+          rm -f id_ed25519
+
+      - name: Smoke check the live site
+        run: |
+          for i in 1 2 3 4 5; do
+            code=$(curl -s -o /dev/null -w '%{http_code}' https://giacenza.lambdasistemi.net/)
+            [ "$code" = "200" ] && break
+            sleep 5
+          done
+          curl -sf -o /dev/null https://giacenza.lambdasistemi.net/
+          curl -sf -o /dev/null https://giacenza.lambdasistemi.net/app.wasm
+          curl -sf -o /dev/null https://giacenza.lambdasistemi.net/ghc_wasm_jsffi.js
